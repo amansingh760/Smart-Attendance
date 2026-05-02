@@ -5,6 +5,9 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
+import express from "express";
+import path from "path";
+
 
 const app = express();
 app.use(cors());
@@ -1014,5 +1017,19 @@ app.delete('/api/leaves/:id', auth, adminOnly, (req, res) => {
   res.json({ success: true });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`GeoAttend API running on port ${PORT}`));
+// const PORT = process.env.PORT || 5000;
+// app.listen(PORT, () => console.log(`GeoAttend API running on port ${PORT}`));
+
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Serve frontend build
+app.use(express.static(path.join(__dirname, "../frontend/dist")));
+
+// Fallback for SPA routes
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "../frontend/dist/index.html"));
+});
+
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
