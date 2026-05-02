@@ -13,6 +13,95 @@ app.use(express.json({ limit: '5mb' })); // face descriptors can be large
 const DB_PATH = path.join(__dirname, '../db.json');
 const JWT_SECRET = process.env.JWT_SECRET || 'geoattend_secret_2024';
 
+
+// ── MSG91 SMS helper ───────────────────────────────────────────────────────
+// Uses MSG91 REST API — no SDK, no extra npm package required.
+// Cheapest trusted SMS provider for India (₹0.18–0.25/SMS, DLT compliant).
+//
+// Setup:
+//  1. Sign up at https://msg91.com
+//  2. Complete DLT registration (free, mandatory for Indian numbers)
+//  3. Create a transactional SMS template on MSG91 dashboard
+//  4. Set env vars in backend/.env
+//
+// If env vars are not set, SMS is silently skipped — app works without it.
+
+const https = require('https');
+
+async function sendSMS(toNumber, message) {
+  const authKey    = process.env.MSG91_AUTH_KEY;
+  const senderId   = process.env.MSG91_SENDER_ID   || 'GEOATT';
+  const templateId = process.env.MSG91_TEMPLATE_ID;
+  const route      = process.env.MSG91_ROUTE        || '4';
+
+  // Silently skip if not configured
+  if (!authKey || !toNumber) return;
+
+  // Normalise to 10-digit Indian mobile (MSG91 needs 91XXXXXXXXXX format)
+  const digits = toNumber.replace(/\D/g, '');
+  let mobile = digits;
+  if (digits.length === 10)                           mobile = `91${digits}`;
+  else if (digits.length === 12 && digits.startsWith('91')) mobile = digits;
+  else if (digits.startsWith('+91') && digits.length === 13) mobile = digits.slice(1);
+  else mobile = digits; // pass as-is for non-Indian numbers
+
+  const payload = JSON.stringify({
+    sender:   senderId,
+    route:    route,
+    country:  '91',
+    sms: [{
+      message:  message,
+      to:       [mobile],
+      ...(templateId ? { template_id: templateId } : {})
+    }]
+  });
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'api.msg91.com',
+      path:     '/api/v2/sendsms',
+      method:   'POST',
+      headers: {
+        'authkey':      authKey,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    };
+
+    const req = https.request(options, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const r = JSON.parse(data);
+          if (r.type === 'success') console.log(`SMS sent to ${mobile}`);
+          else console.warn('MSG91 response:', data);
+        } catch { console.log('MSG91 raw response:', data); }
+        resolve();
+      });
+    });
+
+    req.on('error', err => {
+      // Never crash the app over SMS failure
+      console.error('SMS send error:', err.message);
+      resolve();
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+// Format Indian phone to 10-digit string (strips +91, country code etc.)
+function formatPhone(phone) {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 10) return digits;
+  if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
+  if (digits.length === 13 && digits.startsWith('091')) return digits.slice(3);
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
 // ── DB helpers ────────────────────────────────────────────────────────────────
 function readDB() {
   try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); }
@@ -269,7 +358,7 @@ function isLateCheckIn(db, checkInISO) {
   return ciMins > (sh * 60 + sm + grace);
 }
 
-// Normal GPS-based check-in
+// GPS-based check-in — supports multiple sessions per day
 app.post('/api/attendance/checkin', auth, (req, res) => {
   const { lat, lng, zoneId, faceVerified, lateReason } = req.body;
   const db = readDB();
@@ -278,55 +367,133 @@ app.post('/api/attendance/checkin', auth, (req, res) => {
   const today = new Date().toISOString().split('T')[0];
   if (db.holidays.find(h => h.date === today))
     return res.status(400).json({ error: 'Today is a holiday. Attendance not required.' });
-  const existing = db.records.find(r => r.userId === req.user.id && r.date === today);
-  if (existing?.checkIn) return res.status(400).json({ error: 'Already checked in today' });
+
   const zone = db.zones.find(z => z.id === zoneId);
   if (!zone) return res.status(404).json({ error: 'Zone not found' });
   const distance = haversine(lat, lng, zone.lat, zone.lng);
   if (distance > zone.radius)
     return res.status(400).json({ error: `Outside geofence. You are ${Math.round(distance)}m away (max ${zone.radius}m)` });
-  // Check-in window: block if before checkInOpenTime
+
+  // Check-in window
   const openTime = db.settings?.checkInOpenTime;
   if (openTime) {
     const now_ = new Date();
     const nowMins = now_.getHours() * 60 + now_.getMinutes();
     const [oh, om] = openTime.split(':').map(Number);
     if (nowMins < oh * 60 + om)
-      return res.status(400).json({ error: `Check-in not allowed before ${openTime}. Please come back later.`, code: 'BEFORE_OPEN_TIME' });
+      return res.status(400).json({ error: `Check-in not allowed before ${openTime}.`, code: 'BEFORE_OPEN_TIME' });
   }
-  // Face auth check
+
   if (db.settings?.requireFaceAuth && user.faceDescriptor && !faceVerified)
     return res.status(403).json({ error: 'Face authentication required', code: 'FACE_REQUIRED' });
+
   const now = new Date().toISOString();
   const late = isLateCheckIn(db, now);
-  const rec = {
-    id: uuidv4(), userId: req.user.id, userName: user.name, dept: user.dept,
-    zoneId, zoneName: zone.name, date: today, checkIn: now, checkOut: null,
-    status: late ? 'late' : 'present', lat, lng, method: 'geofence',
-    note: lateReason ? `Late reason: ${lateReason}` : '', editedBy: null,
-    faceVerified: !!faceVerified, lateReason: lateReason || ''
-  };
-  if (existing) { Object.assign(existing, rec); } else { db.records.unshift(rec); }
+
+  const existing = db.records.find(r => r.userId === req.user.id && r.date === today);
+
+  if (existing) {
+    // Block if last session is still open (not checked out yet)
+    const sessions = existing.sessions || [];
+    const lastSession = sessions[sessions.length - 1];
+    if (lastSession && !lastSession.checkOut)
+      return res.status(400).json({ error: 'Please check out before checking in again.' });
+
+    // Add new session
+    const newSession = {
+      sessionId: uuidv4(), checkIn: now, checkOut: null,
+      zoneId, zoneName: zone.name, lat, lng,
+      faceVerified: !!faceVerified, lateReason: lateReason || '',
+      method: 'geofence'
+    };
+    existing.sessions = [...sessions, newSession];
+    // Keep root checkIn as first session's time for backward compat
+    if (!existing.checkIn) existing.checkIn = now;
+    existing.status = late ? 'late' : 'present';
+    if (late && lateReason) existing.lateReason = lateReason;
+  } else {
+    // First check-in of the day — create record with first session
+    const newSession = {
+      sessionId: uuidv4(), checkIn: now, checkOut: null,
+      zoneId, zoneName: zone.name, lat, lng,
+      faceVerified: !!faceVerified, lateReason: lateReason || '',
+      method: 'geofence'
+    };
+    db.records.unshift({
+      id: uuidv4(), userId: req.user.id, userName: user.name, dept: user.dept,
+      zoneId, zoneName: zone.name, date: today,
+      checkIn: now, checkOut: null,
+      sessions: [newSession],
+      status: late ? 'late' : 'present',
+      lat, lng, method: 'geofence',
+      note: lateReason ? `Late reason: ${lateReason}` : '',
+      editedBy: null, faceVerified: !!faceVerified, lateReason: lateReason || ''
+    });
+  }
+
   writeDB(db);
-  res.json({ success: true, checkIn: now, zoneName: zone.name, late, status: rec.status });
+
+  // SMS — GPS check-in only
+  const tz = db.settings?.timezone || 'Asia/Kolkata';
+  const ciTimeStr = new Date(now).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: tz });
+  const existingNow = db.records.find(r => r.userId === req.user.id && r.date === today);
+  const sessionNum = existingNow?.sessions?.length || 1;
+  const smsText = late
+    ? `${db.settings?.companyName || 'GeoAttend'}: Dear ${user.name}, you checked IN at ${ciTimeStr} (LATE) at ${zone.name}. Reason: ${lateReason || 'Not provided'}.`
+    : `${db.settings?.companyName || 'GeoAttend'}: Dear ${user.name}, you checked IN at ${ciTimeStr} at ${zone.name}${sessionNum > 1 ? ` (session ${sessionNum})` : ''}.`;
+  sendSMS(formatPhone(user.phone), smsText);
+
+  res.json({ success: true, checkIn: now, zoneName: zone.name, late, status: late ? 'late' : 'present', sessionNumber: sessionNum });
 });
 
-// Check-out (GPS-based)
+// GPS-based check-out — closes the latest open session
 app.post('/api/attendance/checkout', auth, (req, res) => {
   const { lat, lng, zoneId, faceVerified } = req.body;
   const db = readDB();
   const today = new Date().toISOString().split('T')[0];
-  const rec = db.records.find(r => r.userId === req.user.id && r.date === today && r.checkIn && !r.checkOut);
-  if (!rec) return res.status(400).json({ error: 'No active check-in found' });
+  const rec = db.records.find(r => r.userId === req.user.id && r.date === today);
+  if (!rec) return res.status(400).json({ error: 'No check-in found for today.' });
+
+  // Find the last open session
+  const sessions = rec.sessions || [];
+  const openSession = [...sessions].reverse().find(s => s.checkIn && !s.checkOut);
+  if (!openSession) return res.status(400).json({ error: 'No active check-in found. Please check in first.' });
+
   const user = db.users.find(u => u.id === req.user.id);
   if (db.settings?.requireFaceAuth && user?.faceDescriptor && !faceVerified)
     return res.status(403).json({ error: 'Face authentication required', code: 'FACE_REQUIRED' });
-  const zone = db.zones.find(z => z.id === (zoneId || rec.zoneId));
+
+  const zone = db.zones.find(z => z.id === (zoneId || openSession.zoneId || rec.zoneId));
   if (zone && haversine(lat, lng, zone.lat, zone.lng) > zone.radius)
     return res.status(400).json({ error: 'Outside geofence zone' });
-  rec.checkOut = new Date().toISOString();
+
+  const now = new Date().toISOString();
+  openSession.checkOut = now;
+
+  // Update root checkOut to the latest session's checkOut for backward compat
+  rec.checkOut = now;
+
+  // Recalculate total worked minutes across all completed sessions
+  const totalMins = sessions.reduce((sum, s) => {
+    if (!s.checkIn || !s.checkOut) return sum;
+    return sum + Math.round((new Date(s.checkOut) - new Date(s.checkIn)) / 60000);
+  }, 0);
+  rec.totalMins = totalMins;
+
   writeDB(db);
-  res.json({ success: true, checkOut: rec.checkOut });
+
+  // SMS — GPS check-out only
+  const tz_ = db.settings?.timezone || 'Asia/Kolkata';
+  const coTimeStr = new Date(now).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: tz_ });
+  const sessionNum = sessions.length;
+  const h = Math.floor(totalMins / 60), m = totalMins % 60;
+  const totalStr = totalMins > 0 ? ` Total today: ${h}h ${m}m.` : '';
+  if (user) {
+    sendSMS(formatPhone(user.phone),
+      `${db.settings?.companyName || 'GeoAttend'}: Dear ${user.name}, you checked OUT at ${coTimeStr} from ${rec.zoneName}${sessionNum > 1 ? ` (session ${sessionNum})` : ''}.${totalStr}`);
+  }
+
+  res.json({ success: true, checkOut: now, totalMins, sessionNumber: sessionNum });
 });
 
 // ── Out-of-zone override request ──────────────────────────────────────────────
@@ -421,6 +588,18 @@ app.post('/api/attendance/override-requests/:id/review', auth, adminOnly, (req, 
       }
     }
     logAudit(db, req.user.id, 'OVERRIDE_APPROVED', `Approved override for ${ov.userName} on ${ov.date}`);
+    
+    // SMS — override is GPS-equivalent (employee was physically present), so notify
+    const ovUser = db.users.find(u => u.id === ov.userId);
+    if (ovUser) {
+      const ovTz = db.settings?.timezone || 'Asia/Kolkata';
+      const ovTimeStr = new Date(ov.requestedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: ovTz });
+      const ovSms = ov.action === 'checkin'
+        ? `${db.settings?.companyName || 'GeoAttend'}: Dear ${ov.userName}, your out-of-zone check-IN at ${ovTimeStr} on ${ov.date} has been approved by admin.`
+        : `${db.settings?.companyName || 'GeoAttend'}: Dear ${ov.userName}, your out-of-zone check-OUT at ${ovTimeStr} on ${ov.date} has been approved by admin.`;
+      sendSMS(formatPhone(ovUser.phone), ovSms);
+    }
+
   } else {
     logAudit(db, req.user.id, 'OVERRIDE_DENIED', `Denied override for ${ov.userName}: ${note}`);
   }
@@ -483,7 +662,7 @@ app.get('/api/attendance', auth, (req, res) => {
               note:      '',
               lateReason:'',
               editedBy:  null,
-              virtual:   true   // flag so frontend knows it's not a real DB record
+              virtual:   false  // flag so frontend knows it's not a real DB record make it true if want false record
             }
           ];
         }
@@ -523,52 +702,88 @@ app.delete('/api/attendance/:id', auth, adminOnly, (req, res) => {
   logAudit(db, req.user.id, 'DELETE_ATTENDANCE', `Deleted attendance for ${rec.userName} on ${rec.date}`);
   writeDB(db); res.json({ success: true });
 });
-
-// Bulk update (admin)
+// Bulk update (admin) — single day
 app.post('/api/attendance/bulk', auth, adminOnly, (req, res) => {
   const { date, status, userIds, note } = req.body;
   const db = readDB();
+  const startTime = db.settings?.workStartTime || '09:00';
+  const endTime   = db.settings?.workEndTime   || '18:00';
+
   userIds.forEach(uid => {
     const existing = db.records.find(r => r.userId === uid && r.date === date);
     const user = db.users.find(u => u.id === uid);
     if (existing) {
-      existing.status = status; existing.note = note || ''; existing.editedBy = req.user.id; existing.method = 'manual';
-      if (status === 'absent') { existing.checkIn = null; existing.checkOut = null; }
+      existing.status   = status;
+      existing.note     = note || '';
+      existing.editedBy = req.user.id;
+      existing.method   = 'manual';
+      if (status === 'absent') {
+        existing.checkIn  = null;
+        existing.checkOut = null;
+      } else {
+        // Set times from settings if not already present
+        if (!existing.checkIn)  existing.checkIn  = `${date}T${startTime}:00`;
+        if (!existing.checkOut) existing.checkOut = status === 'present' ? `${date}T${endTime}:00` : null;
+      }
     } else if (user) {
-      db.records.unshift({ id: uuidv4(), userId: uid, userName: user.name, dept: user.dept, zoneId: null, zoneName: 'N/A', date, checkIn: null, checkOut: null, status, lat: null, lng: null, method: 'manual', note: note || '', editedBy: req.user.id });
+      db.records.unshift({
+        id: uuidv4(), userId: uid, userName: user.name, dept: user.dept,
+        zoneId: null, zoneName: 'N/A', date,
+        checkIn:  status !== 'absent' ? `${date}T${startTime}:00` : null,
+        checkOut: status === 'present' ? `${date}T${endTime}:00`  : null,
+        status, lat: null, lng: null, method: 'manual',
+        note: note || '', editedBy: req.user.id
+      });
     }
   });
   logAudit(db, req.user.id, 'BULK_ATTENDANCE', `Bulk marked ${userIds.length} users as ${status} on ${date}`);
   writeDB(db); res.json({ success: true });
 });
 
-// ── NEW: Bulk mark for a date RANGE ──────────────────────────────────────────
+// Bulk mark for a date range
 app.post('/api/attendance/bulk-range', auth, adminOnly, (req, res) => {
   const { fromDate, toDate, status, userIds, note, skipHolidays, skipSundays } = req.body;
   if (!fromDate || !toDate || !status || !userIds?.length)
     return res.status(400).json({ error: 'fromDate, toDate, status and userIds required' });
   const db = readDB();
+  const startTime  = db.settings?.workStartTime || '09:00';
+  const endTime    = db.settings?.workEndTime   || '18:00';
   const holidaySet = new Set(db.holidays.map(h => h.date));
   let count = 0;
-  // Iterate each day in range
+
   const from = new Date(fromDate + 'T00:00:00');
-  const to = new Date(toDate + 'T00:00:00');
+  const to   = new Date(toDate   + 'T00:00:00');
   for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
     const dateStr = d.toISOString().split('T')[0];
     const dow = d.getDay();
-    if (skipSundays && dow === 0) continue;
+    if (skipSundays  && dow === 0)              continue;
     if (skipHolidays && holidaySet.has(dateStr)) continue;
+
     userIds.forEach(uid => {
       const user = db.users.find(u => u.id === uid);
       if (!user) return;
       const existing = db.records.find(r => r.userId === uid && r.date === dateStr);
       if (existing) {
-        existing.status = status; existing.note = note || ''; existing.editedBy = req.user.id; existing.method = 'manual';
-        if (status === 'absent') { existing.checkIn = null; existing.checkOut = null; }
+        existing.status   = status;
+        existing.note     = note || '';
+        existing.editedBy = req.user.id;
+        existing.method   = 'manual';
+        if (status === 'absent') {
+          existing.checkIn  = null;
+          existing.checkOut = null;
+        } else {
+          if (!existing.checkIn)  existing.checkIn  = `${dateStr}T${startTime}:00`;
+          if (!existing.checkOut) existing.checkOut = status === 'present' ? `${dateStr}T${endTime}:00` : null;
+        }
       } else {
-        const startTime = db.settings?.workStartTime || '09:30';
-        const endTime   = db.settings?.workEndTime   || '18:30';
-        db.records.unshift({ id: uuidv4(), userId: uid, userName: user.name, dept: user.dept, zoneId: null, zoneName: 'N/A', date: dateStr, checkIn: status !== 'absent' ? `${dateStr}T${startTime}:00` : null, checkOut: status === 'present' ? `${dateStr}T${endTime}:00` : null, status, lat: null, lng: null, method: 'manual', note: note || '', editedBy: req.user.id });
+        db.records.unshift({
+          id: uuidv4(), userId: uid, userName: user.name, dept: user.dept,
+          zoneId: null, zoneName: 'N/A', date: dateStr,
+          checkIn:  status !== 'absent' ? `${dateStr}T${startTime}:00` : null,
+          checkOut: status === 'present' ? `${dateStr}T${endTime}:00`  : null,
+          status, lat: null, lng: null, method: 'manual',
+          note: note || '', editedBy: req.user.id
+        });
       }
       count++;
     });
@@ -635,8 +850,18 @@ function toMinutes(isoStr) { if (!isoStr) return null; const d = new Date(isoStr
         presentDays++;
         // Trust the stored status — do not recalculate late from time
         if (r.status === 'late') lateDays++;
-        const ciMins = toMinutes(r.checkIn), coMins = toMinutes(r.checkOut);
-        if (ciMins !== null && coMins !== null && coMins > ciMins) totalMins += coMins - ciMins;
+        // Sum all completed sessions (supports multiple check-in/out per day)
+        if (r.sessions && r.sessions.length > 0) {
+          r.sessions.forEach(s => {
+            if (s.checkIn && s.checkOut) {
+              totalMins += Math.round((new Date(s.checkOut) - new Date(s.checkIn)) / 60000);
+            }
+          });
+        } else {
+          // Fallback for old records without sessions array
+          const ciMins = toMinutes(r.checkIn), coMins = toMinutes(r.checkOut);
+          if (ciMins !== null && coMins !== null && coMins > ciMins) totalMins += coMins - ciMins;
+        }
       } else if (r.status === 'absent') { absentDays++; }
     });
     absentDays += allDays.filter(d => d.isWorkday && !dailyMap[d.date]).length;
@@ -654,10 +879,24 @@ function toMinutes(isoStr) { if (!isoStr) return null; const d = new Date(isoStr
       } else if (d.isWorkday) {
         status = 'absent';
       }
-      const ciMins = rec ? toMinutes(rec.checkIn) : null, coMins = rec ? toMinutes(rec.checkOut) : null;
-      const workMins = (ciMins !== null && coMins !== null && coMins > ciMins) ? coMins - ciMins : 0;
-      return { date: d.date, status, isHoliday: d.isHoliday, isSunday: d.isSunday, checkIn: rec?.checkIn || null, checkOut: rec?.checkOut || null, workMins, late: rec ? rec.status === 'late' : false, note: rec?.note || '', lateReason: rec?.lateReason || '', method: rec?.method || '' };
-    });
+      let workMins = 0;
+      if (rec) {
+        if (rec.sessions && rec.sessions.length > 0) {
+          rec.sessions.forEach(s => {
+            if (s.checkIn && s.checkOut)
+              workMins += Math.round((new Date(s.checkOut) - new Date(s.checkIn)) / 60000);
+          });
+        } else if (rec.checkIn && rec.checkOut) {
+          const ci = toMinutes(rec.checkIn), co = toMinutes(rec.checkOut);
+          if (ci !== null && co !== null && co > ci) workMins = co - ci;
+        }
+      }
+      return { date: d.date, status, isHoliday: d.isHoliday, isSunday: d.isSunday,
+        checkIn: rec?.checkIn || null, checkOut: rec?.checkOut || null,
+        sessions: rec?.sessions || [],
+        workMins, late: rec ? rec.status === 'late' : false,
+        note: rec?.note || '', lateReason: rec?.lateReason || '', method: rec?.method || '' };
+      });
     return { userId: user.id, name: user.name, dept: user.dept, avatar: user.avatar, color: user.color, presentDays, absentDays, lateDays, totalMins, avgMinsPerDay, attendancePct: workdays > 0 ? Math.round((presentDays / workdays) * 100) : 0, workdays, days };
   });
   res.json({ month, workdays, holidays: [...monthHolidays], allDays, employees });

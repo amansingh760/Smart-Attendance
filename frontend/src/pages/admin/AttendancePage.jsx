@@ -248,11 +248,12 @@ export default function AttendancePage() {
       </div>
 
       {/* Filters */}
+      
       <div className="card mb-24" style={{ padding: '14px 20px' }}>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div>
             <label className="form-label">Date</label>
-            <input type="date" className="form-input" value={filters.date} onChange={e => setFilters(f => ({ ...f, date: e.target.value }))} style={{ width: 168 }} />
+            <input type="date" className="form-input" value={filters.date} onChange={e => setFilters(f => ({ ...f, date: e.target.value }))} style={{ width: 168 }} max={DEFAULT_DATE} />
           </div>
           <div>
             <label className="form-label">Employee</label>

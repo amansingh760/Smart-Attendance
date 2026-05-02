@@ -67,6 +67,8 @@ export default function CheckInPage() {
     : null;
   const isInside = distance !== null && selectedZone && distance <= selectedZone.radius;
 
+  const lateNow2 = isLateTime(new Date().toISOString(), settings.workEndTime);
+
   // Use isLateTime from utils — uses new Date() so local TZ is correct
   const lateNow = isLateTime(new Date().toISOString(), settings.workStartTime, settings.lateGraceMinutes);
   // Use isTooEarly For Too early check in
@@ -353,26 +355,50 @@ export default function CheckInPage() {
 
             {/* Check-in / Check-out times — fmtTime uses new Date() so TZ is correct */}
             <div className="grid-2" style={{ gap: 10, marginBottom: 18 }}>
-              <div className="stat-card">
-                <div className="stat-label">Check In</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 700, color: 'var(--green)' }}>
-                  {fmtTime(todayRecord?.checkIn)}
+              {/* Show sessions if multiple, otherwise show single check-in/out */}
+            {todayRecord?.sessions?.length > 1 ? (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <div className="stat-label" style={{ marginBottom: 8 }}>Today's Sessions</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {todayRecord.sessions.map((s, i) => (
+                    <div key={s.sessionId || i} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--bg3)', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                      <span style={{ color: 'var(--text3)', minWidth: 60 }}>Session {i + 1}</span>
+                      <span style={{ color: 'var(--green)', fontWeight: 600 }}>In: {fmtTime(s.checkIn)}</span>
+                      <span style={{ color: 'var(--text3)' }}>→</span>
+                      <span style={{ color: s.checkOut ? 'var(--accent)' : 'var(--amber)', fontWeight: 600 }}>
+                        {s.checkOut ? `Out: ${fmtTime(s.checkOut)}` : 'Active ●'}
+                      </span>
+                      {s.checkIn && s.checkOut && (
+                        <span style={{ color: 'var(--text3)', marginLeft: 'auto' }}>{fmtDuration(s.checkIn, s.checkOut)}</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                {todayRecord?.status === 'late' && <span className="badge badge-amber" style={{ fontSize: 10, marginTop: 4 }}>Late</span>}
               </div>
-              <div className="stat-card">
-                <div className="stat-label">Check Out</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 700, color: 'var(--accent)' }}>
-                  {fmtTime(todayRecord?.checkOut)}
+            ) : (
+              <>
+                <div className="stat-card">
+                  <div className="stat-label">Check In</div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 700, color: 'var(--green)' }}>
+                    {fmtTime(todayRecord?.checkIn)}
+                  </div>
+                  {todayRecord?.status === 'late' && <span className="badge badge-amber" style={{ fontSize: 10, marginTop: 4 }}>Late</span>}
                 </div>
-              </div>
+                <div className="stat-card">
+                  <div className="stat-label">Check Out</div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 700, color: 'var(--accent)' }}>
+                    {fmtTime(todayRecord?.checkOut)}
+                  </div>
+                </div>
+              </>
+            )}
             </div>
 
             {!todayRecord?.checkIn ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <button
                   onClick={initiateCheckIn}
-                  disabled={!isInside || loading || tooEarly}
+                  disabled={!isInside || loading || tooEarly || lateNow2 }
                   style={{ padding: 16, fontSize: 15, fontWeight: 700, width: '100%', background: isInside ? 'linear-gradient(135deg,#059669,#34d399)' : 'var(--surface)', color: 'white', border: 'none', borderRadius: 12, cursor: isInside ? 'pointer' : 'not-allowed', opacity: isInside ? 1 : 0.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
                 >
                   {loading ? <span className="pulsing">⟳</span> : null}
