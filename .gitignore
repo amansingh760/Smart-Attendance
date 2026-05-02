@@ -24,3 +24,7 @@ logs/
 # Railway / Docker
 railway.json
 docker-compose.override.yml
+node_modules/
+dist/
+build/
+.env
