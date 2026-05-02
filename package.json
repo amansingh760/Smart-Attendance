@@ -1,5 +1,5 @@
 {
-  "name": "geoattend",
+  "name": "smart-attendance",
   "version": "1.0.0",
   "scripts": {
     "install": "cd backend && npm install && cd ../frontend && npm install",
