@@ -22,11 +22,6 @@ const FRONTEND_DIST = process.env.FRONTEND_DIST
   || path.join(__dirname, '../../frontend/dist');
 app.use(express.static(FRONTEND_DIST));
 
-app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api')) {
-    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
-  }
-});
 
 // // Works both locally (from backend/src/) and on Railway (from repo root)
 // const FRONTEND_DIST = process.env.FRONTEND_DIST
@@ -1052,6 +1047,7 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
   }
 });
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`GeoAttend API running on port ${PORT}`));
