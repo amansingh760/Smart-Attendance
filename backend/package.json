@@ -1,11 +1,11 @@
 {
   "name": "geoattend-backend",
   "version": "1.0.0",
-  "description": "GeoAttend - Geofencing Attendance System Backend",
   "main": "src/server.js",
   "scripts": {
+    "build": "cd ../frontend && npm install && npm run build",
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "deploy": "npm run build && npm start"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -13,8 +13,5 @@
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.0",
     "uuid": "^9.0.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
   }
 }

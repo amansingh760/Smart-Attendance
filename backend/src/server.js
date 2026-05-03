@@ -13,7 +13,17 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '5mb' })); // face descriptors can be large
 
-const DB_PATH = path.join(__dirname, '../db.json');
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '5mb' }));
+
+// Works both locally (from backend/src/) and on Railway (from repo root)
+const FRONTEND_DIST = process.env.FRONTEND_DIST
+  || path.join(__dirname, '../../frontend/dist');
+app.use(express.static(FRONTEND_DIST));
+
+// const DB_PATH = path.join(__dirname, '../db.json');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../db.json');
 const JWT_SECRET = process.env.JWT_SECRET || 'geoattend_secret_2024';
 
 
@@ -1020,16 +1030,17 @@ app.delete('/api/leaves/:id', auth, adminOnly, (req, res) => {
 // const PORT = process.env.PORT || 5000;
 // app.listen(PORT, () => console.log(`GeoAttend API running on port ${PORT}`));
 
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Serve frontend build
-app.use(express.static(path.join(__dirname, "../frontend/dist")));
-
-// Fallback for SPA routes
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../frontend/dist/index.html"));
+// // All non-API routes serve the React app (client-side routing)
+// app.get('*', (req, res) => {
+//   if (!req.path.startsWith('/api')) {
+//     res.sendFile(path.join(__dirname, '../../frontend/dist/index.html'));
+//   }
+// });
+app.get('*', (req, res) => {
+  if (!req.path.startsWith('/api')) {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`GeoAttend API running on port ${PORT}`));
