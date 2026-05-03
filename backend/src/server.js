@@ -7,7 +7,13 @@ const fs = require('fs');
 const path = require('path');
 // import express from "express";
 // import path from "path";
-
+// Force HTTPS redirect middleware
+app.use((req, res, next) => {
+  if (req.headers['x-forwarded-proto'] !== 'https') {
+    return res.redirect('https://' + req.headers.host + req.url);
+  }
+  next();
+});
 
 //  const app = express();
 // app.use(cors());
