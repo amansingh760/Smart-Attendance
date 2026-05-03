@@ -8,6 +8,8 @@ const path = require('path');
 // import express from "express";
 // import path from "path";
 // Force HTTPS redirect middleware
+const app = express();
+
 app.use((req, res, next) => {
   if (req.headers['x-forwarded-proto'] !== 'https') {
     return res.redirect('https://' + req.headers.host + req.url);
@@ -19,7 +21,7 @@ app.use((req, res, next) => {
 // app.use(cors());
 // app.use(express.json({ limit: '5mb' })); // face descriptors can be large
 
-const app = express();
+
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
