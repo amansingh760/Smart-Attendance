@@ -5,13 +5,13 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
-import express from "express";
-import path from "path";
+// import express from "express";
+// import path from "path";
 
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '5mb' })); // face descriptors can be large
+//  const app = express();
+// app.use(cors());
+// app.use(express.json({ limit: '5mb' })); // face descriptors can be large
 
 const app = express();
 app.use(cors());
