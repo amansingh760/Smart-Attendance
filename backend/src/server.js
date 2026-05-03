@@ -22,6 +22,17 @@ const FRONTEND_DIST = process.env.FRONTEND_DIST
   || path.join(__dirname, '../../frontend/dist');
 app.use(express.static(FRONTEND_DIST));
 
+app.get('*', (req, res) => {
+  if (!req.path.startsWith('/api')) {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  }
+});
+
+// // Works both locally (from backend/src/) and on Railway (from repo root)
+// const FRONTEND_DIST = process.env.FRONTEND_DIST
+//   || path.join(__dirname, '../../frontend/dist');
+// app.use(express.static(FRONTEND_DIST));
+
 // const DB_PATH = path.join(__dirname, '../db.json');
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../db.json');
 const JWT_SECRET = process.env.JWT_SECRET || 'geoattend_secret_2024';
