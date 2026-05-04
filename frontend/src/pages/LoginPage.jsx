@@ -24,10 +24,10 @@ export default function LoginPage() {
     }
   };
 
-  // const fillDemo = (role) => {
-  //   if (role === 'admin') setForm({ email: 'admin@geoattend.in', password: 'admin123' });
-  //   else setForm({ email: 'arjun@geoattend.in', password: 'user123' });
-  // };
+  const fillDemo = (role) => {
+    if (role === 'admin') setForm({ email: 'admin@geoattend.in', password: 'admin123' });
+    else setForm({ email: 'arjun@geoattend.in', password: 'user123' });
+  };
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', padding: 20 }}>
